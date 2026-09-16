@@ -42,7 +42,6 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.30"
-          enable-cache: true
       - run: uv sync --locked
       - name: Starter tests against PostgreSQL
         run: uv run pytest -q test_agent_relay.py
