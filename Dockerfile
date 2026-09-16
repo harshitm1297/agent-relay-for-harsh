@@ -19,7 +19,7 @@ RUN useradd --create-home --uid 10001 relay \
     && chown relay:relay /data
 COPY --chown=relay:relay *.py dashboard.html SPEC.md README.md ./
 
-USER relay
+USER 10001:10001
 EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
   CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2)"]
