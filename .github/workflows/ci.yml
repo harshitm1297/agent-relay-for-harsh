@@ -1,0 +1,98 @@
+name: CI and local kind deployment
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: agent_relay_test
+          POSTGRES_USER: relay
+          POSTGRES_PASSWORD: relay-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U relay -d agent_relay_test"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      RELAY_BASE_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure PostgreSQL address
+        shell: bash
+        run: |
+          if [ "${ACT:-}" = "true" ]; then
+            database_host=postgres
+          else
+            database_host=localhost
+          fi
+          echo "RELAY_DATABASE_URL=postgresql+psycopg://relay:relay-test-password@${database_host}:5432/agent_relay_test" >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.30"
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Starter tests against PostgreSQL
+        run: uv run pytest -q test_agent_relay.py
+      - name: Start real API
+        run: |
+          uv run uvicorn main:app --host 0.0.0.0 --port 8000 > /tmp/agent-relay.log 2>&1 &
+          for attempt in {1..30}; do
+            curl --fail --silent http://127.0.0.1:8000/ready && exit 0
+            sleep 1
+          done
+          cat /tmp/agent-relay.log
+          exit 1
+      - name: Acceptance scenario integration test
+        run: uv run pytest -q tests/integration
+
+  build-and-deploy:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Choose immutable image tag
+        run: echo "IMAGE=agent-relay:${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+      - name: Build image
+        run: docker build --tag "$IMAGE" .
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.31.0"
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: agent-relay-ci
+          wait: 120s
+      - name: Load image and deploy
+        run: |
+          kind load docker-image "$IMAGE" --name agent-relay-ci
+          kubectl apply -f k8s/
+          kubectl -n agent-relay set image deployment/agent-relay agent-relay="$IMAGE"
+          kubectl -n agent-relay rollout status statefulset/postgres --timeout=180s
+          kubectl -n agent-relay rollout status deployment/agent-relay --timeout=180s
+      - name: Verify deployed v2 dashboard
+        run: |
+          kubectl -n agent-relay port-forward service/agent-relay 8000:8000 > /tmp/port-forward.log 2>&1 &
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8000/ | grep -q "Agent Relay v2"; then
+              echo "Agent Relay v2 is deployed"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/port-forward.log
+          kubectl -n agent-relay get all
+          exit 1

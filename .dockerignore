@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+.uv-cache
+.uv-python
+__pycache__
+.pytest_cache
+*.db
+*.db-shm
+*.db-wal
+*-credentials.json
+k8s
+tests
+test_agent_relay.py
+HOMEWORK_ANSWERS.md

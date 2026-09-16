@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from database import (
     Agent,
     Attempt,
+    IS_POSTGRESQL,
     LEASE_SECONDS,
     MAX_ATTEMPTS,
     Task,
@@ -144,12 +145,15 @@ def claim_one(agent_id: str, worker_id: str | None) -> dict[str, Any] | None:
     with immediate_transaction() as db:
         now = utcnow()
         recover_expired_in_session(db, now)
-        task = db.scalar(
+        statement = (
             select(Task)
             .where(Task.recipient_id == agent_id, Task.status == "queued")
             .order_by(Task.created_at, Task.id)
             .limit(1)
         )
+        if IS_POSTGRESQL:
+            statement = statement.with_for_update(skip_locked=True)
+        task = db.scalar(statement)
         if task is None:
             return None
         if task.attempt_count >= MAX_ATTEMPTS:
@@ -195,7 +199,7 @@ def _find_attempt_for_token(db: Session, task_id: str, token: str) -> Attempt | 
 
 def heartbeat(task_id: str, agent_id: str, claim_token: str) -> str:
     with immediate_transaction() as db:
-        task = db.get(Task, task_id)
+        task = db.get(Task, task_id, with_for_update=IS_POSTGRESQL)
         if task is None or task.recipient_id != agent_id:
             raise RelayError("not_found", "Task not found.", 404)
         attempt = _find_attempt_for_token(db, task_id, claim_token)
@@ -222,7 +226,7 @@ def commit_terminal(
     value: str,
 ) -> dict[str, str]:
     with immediate_transaction() as db:
-        task = db.get(Task, task_id)
+        task = db.get(Task, task_id, with_for_update=IS_POSTGRESQL)
         if task is None or task.recipient_id != agent_id:
             raise RelayError("not_found", "Task not found.", 404)
         attempt = _find_attempt_for_token(db, task_id, claim_token)

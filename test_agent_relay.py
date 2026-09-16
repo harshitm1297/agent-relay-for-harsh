@@ -13,7 +13,7 @@ import os
 # Default to a scratch DB so `pytest` never resets the dev server's
 # `./agent-relay.db`. Respect an explicit RELAY_DATABASE_URL/DATABASE_URL
 # (e.g. CI pointing at PostgreSQL), but otherwise isolate tests.
-os.environ.setdefault("RELAY_DATABASE_URL", "sqlite:////tmp/agent-relay-test.db")
+os.environ.setdefault("RELAY_DATABASE_URL", "sqlite:///./agent-relay-test.db")
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -156,6 +156,7 @@ def test_dashboard_is_asset_and_invalid_input_is_documented_error():
     with TestClient(main.app) as client:
         page = client.get("/")
         assert page.status_code == 200
+        assert "Agent Relay v2" in page.text
         assert "sessionStorage" in page.text
         missing_name = client.post("/api/v1/agents", json={})
         assert missing_name.status_code == 400

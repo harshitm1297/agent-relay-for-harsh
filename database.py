@@ -1,9 +1,8 @@
-"""SQLite database setup and durable Agent Relay models.
+"""Database setup and durable Agent Relay models.
 
-This module is intentionally the only place that knows about SQLite connection
-pragmas and its writer-lock transaction.  The rest of the application talks to
-the models through :mod:`storage`; replacing this module with a PostgreSQL
-engine and a row-locking claim transaction is the planned student exercise.
+This module contains the database-specific concurrency boundary. SQLite uses a
+writer-lock transaction, while PostgreSQL uses row locks selected by the
+storage layer. The HTTP protocol is identical for both databases.
 """
 
 from __future__ import annotations
@@ -143,6 +142,7 @@ if _is_sqlite(DATABASE_URL):
         engine_kwargs["poolclass"] = StaticPool
 
 engine: Engine = create_engine(DATABASE_URL, **engine_kwargs)
+IS_POSTGRESQL = engine.dialect.name == "postgresql"
 
 if _is_sqlite(DATABASE_URL):
 
@@ -177,14 +177,22 @@ def db_session() -> Generator[Session, None, None]:
 
 @contextmanager
 def immediate_transaction() -> Generator[Session, None, None]:
-    """Run one SQLite writer transaction before selecting or changing work.
+    """Run one atomic task-state transaction.
 
     SQLite does not support PostgreSQL's ``FOR UPDATE SKIP LOCKED``.  A
     ``BEGIN IMMEDIATE`` writer reservation serializes claims (and recovery or
-    terminal submissions) across API processes, giving each task one active
-    lease.  This is the intentionally isolated seam for a future PostgreSQL
-    implementation.
+    terminal submissions) across API processes. PostgreSQL uses an ordinary
+    transaction here and row locks in the relevant storage queries.
     """
+
+    if not _is_sqlite(DATABASE_URL):
+        session = SessionLocal()
+        try:
+            with session.begin():
+                yield session
+        finally:
+            session.close()
+        return
 
     connection = engine.connect()
     session = Session(bind=connection, expire_on_commit=False, autoflush=True)
@@ -205,17 +213,30 @@ def recover_expired_in_session(db: Session, now: datetime) -> int:
     """Expire active leases and requeue/fail their tasks within ``db``."""
 
     now_db = as_db_time(now)
-    expired = list(
-        db.scalars(
-            select(Attempt)
-            .where(Attempt.outcome == "processing", Attempt.lease_expires_at <= now_db)
-            .order_by(Attempt.lease_expires_at, Attempt.id)
+    task_statement = (
+        select(Task)
+        .join(Attempt, Attempt.task_id == Task.id)
+        .where(
+            Task.status == "processing",
+            Attempt.outcome == "processing",
+            Attempt.lease_expires_at <= now_db,
         )
+        .order_by(Attempt.lease_expires_at, Attempt.id)
     )
+    if IS_POSTGRESQL:
+        task_statement = task_statement.with_for_update(of=Task, skip_locked=True)
+    tasks = list(db.scalars(task_statement))
     count = 0
-    for attempt in expired:
-        task = db.get(Task, attempt.task_id)
-        if task is None or attempt.outcome != "processing":
+    for task in tasks:
+        attempt_statement = select(Attempt).where(
+            Attempt.task_id == task.id,
+            Attempt.outcome == "processing",
+            Attempt.lease_expires_at <= now_db,
+        )
+        if IS_POSTGRESQL:
+            attempt_statement = attempt_statement.with_for_update()
+        attempt = db.scalar(attempt_statement)
+        if attempt is None or task.status != "processing":
             continue
         attempt.outcome = "expired"
         attempt.finished_at = now_db
@@ -246,6 +267,7 @@ __all__ = [
     "DATABASE_URL",
     "DEFAULT_PAGE_SIZE",
     "LEASE_SECONDS",
+    "IS_POSTGRESQL",
     "MAX_ATTEMPTS",
     "MAX_BODY_BYTES",
     "MAX_PAGE_SIZE",

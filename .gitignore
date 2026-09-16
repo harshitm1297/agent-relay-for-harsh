@@ -1,4 +1,8 @@
 .venv
+.uv-cache/
+.uv-python/
+.tools/
+.act-cache/
 .ruff_cache/
 *.db
 *.db-shm
