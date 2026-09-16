@@ -81,6 +81,15 @@ jobs:
           kubectl -n agent-relay set image deployment/agent-relay agent-relay="$IMAGE"
           kubectl -n agent-relay rollout status statefulset/postgres --timeout=180s
           kubectl -n agent-relay rollout status deployment/agent-relay --timeout=180s
+      - name: Show rollout diagnostics
+        if: failure()
+        run: |
+          kubectl -n agent-relay get pods,pvc,events -o wide
+          kubectl get pv
+          kubectl -n agent-relay describe statefulset/postgres
+          kubectl -n agent-relay describe deployment/agent-relay
+          kubectl -n agent-relay logs statefulset/postgres --all-containers --tail=100 || true
+          kubectl -n agent-relay logs deployment/agent-relay --all-containers --tail=100 || true
       - name: Verify deployed v2 dashboard
         run: |
           kubectl -n agent-relay port-forward service/agent-relay 8000:8000 > /tmp/port-forward.log 2>&1 &
