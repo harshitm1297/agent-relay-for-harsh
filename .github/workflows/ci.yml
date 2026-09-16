@@ -67,7 +67,9 @@ jobs:
       - name: Choose immutable image tag
         run: echo "IMAGE=agent-relay:${GITHUB_SHA::12}" >> "$GITHUB_ENV"
       - name: Build image
-        run: docker build --tag "$IMAGE" .
+        run: |
+          docker build --tag "$IMAGE" .
+          docker pull postgres:16-alpine
       - uses: azure/setup-kubectl@v4
         with:
           version: "v1.31.0"
@@ -79,22 +81,33 @@ jobs:
         timeout-minutes: 3
         run: |
           kind load docker-image "$IMAGE" --name agent-relay-ci
-      - name: Deploy to kind
-        timeout-minutes: 5
+          kind load docker-image postgres:16-alpine --name agent-relay-ci
+      - name: Apply Kubernetes manifests
         run: |
           kubectl apply -f k8s/
           kubectl -n agent-relay set image deployment/agent-relay agent-relay="$IMAGE"
+      - name: Wait for PostgreSQL
+        timeout-minutes: 4
+        run: |
           kubectl -n agent-relay rollout status statefulset/postgres --timeout=180s
+      - name: Wait for Agent Relay
+        timeout-minutes: 4
+        run: |
           kubectl -n agent-relay rollout status deployment/agent-relay --timeout=180s
       - name: Show rollout diagnostics
         if: failure()
         run: |
-          kubectl -n agent-relay get pods,pvc,events -o wide
+          kubectl -n agent-relay get pods,pvc,events -o wide | tee /tmp/diagnostics.txt
           kubectl get pv
           kubectl -n agent-relay describe statefulset/postgres
           kubectl -n agent-relay describe deployment/agent-relay
           kubectl -n agent-relay logs statefulset/postgres --all-containers --tail=100 || true
           kubectl -n agent-relay logs deployment/agent-relay --all-containers --tail=100 || true
+          diagnostics="$(tail -c 4000 /tmp/diagnostics.txt)"
+          diagnostics="${diagnostics//'%'/'%25'}"
+          diagnostics="${diagnostics//$'\n'/'%0A'}"
+          diagnostics="${diagnostics//$'\r'/'%0D'}"
+          echo "::error title=Kubernetes rollout diagnostics::$diagnostics"
       - name: Verify deployed v2 dashboard
         run: |
           kubectl -n agent-relay port-forward service/agent-relay 8000:8000 > /tmp/port-forward.log 2>&1 &
