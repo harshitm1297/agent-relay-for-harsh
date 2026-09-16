@@ -60,6 +60,7 @@ jobs:
     needs: test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -74,9 +75,13 @@ jobs:
         with:
           cluster_name: agent-relay-ci
           wait: 120s
-      - name: Load image and deploy
+      - name: Load image into kind
+        timeout-minutes: 3
         run: |
           kind load docker-image "$IMAGE" --name agent-relay-ci
+      - name: Deploy to kind
+        timeout-minutes: 5
+        run: |
           kubectl apply -f k8s/
           kubectl -n agent-relay set image deployment/agent-relay agent-relay="$IMAGE"
           kubectl -n agent-relay rollout status statefulset/postgres --timeout=180s
